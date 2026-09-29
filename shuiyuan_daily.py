@@ -283,15 +283,33 @@ def metadata_diary_reason(topic_meta: dict[str, Any]) -> str:
     return ""
 
 
-def collect_topic(page: Any, topic_meta: dict[str, Any], category_paths: dict[int, str]) -> dict[str, Any]:
+def post_in_window(post: dict[str, Any], start: datetime, end: datetime) -> bool:
+    created = parse_time(post.get("created_at"))
+    updated = parse_time(post.get("updated_at"))
+    return bool(
+        (created and start <= created < end)
+        or (updated and start <= updated < end)
+    )
+
+
+def collect_topic(
+    page: Any,
+    topic_meta: dict[str, Any],
+    category_paths: dict[int, str],
+    window_start: datetime | None = None,
+    window_end: datetime | None = None,
+) -> dict[str, Any]:
     tid = int(topic_meta["id"])
     data = same_origin_json(page, f"/t/{tid}.json", 45_000)
     stream = [int(x) for x in data.get("post_stream", {}).get("stream", [])]
     posts_by_id = {int(p["id"]): p for p in data.get("post_stream", {}).get("posts", []) if p.get("id")}
-    remaining = [pid for pid in stream if pid not in posts_by_id]
     errors: list[str] = []
-    for batch in chunks(remaining, 30):
-        query = urlencode([("post_ids[]", pid) for pid in batch])
+
+    def fetch_batch(batch: list[int]) -> bool:
+        missing_batch = [pid for pid in batch if pid not in posts_by_id]
+        if not missing_batch:
+            return True
+        query = urlencode([("post_ids[]", pid) for pid in missing_batch])
         try:
             extra = same_origin_json(page, f"/t/{tid}/posts.json?{query}", 45_000)
             for post in extra.get("post_stream", {}).get("posts", extra.get("posts", [])):
@@ -299,9 +317,43 @@ def collect_topic(page: Any, topic_meta: dict[str, Any], category_paths: dict[in
                     posts_by_id[int(post["id"])] = post
         except Exception as exc:  # keep the rest of the daily report usable
             errors.append(str(exc))
+            return False
         time.sleep(0.10)
+        return True
+
+    topic_created = parse_time(data.get("created_at") or topic_meta.get("created_at"))
+    scoped = bool(window_start and window_end and topic_created and topic_created < window_start)
+    if scoped:
+        # For an older topic, retain only the first post and posts created or
+        # edited inside the report window. Walk backward from the tail and stop
+        # after the first completely old batch, avoiding a full-thread download.
+        if stream:
+            fetch_batch([stream[0]])
+        tail = stream[1:]
+        for offset in range(len(tail), 0, -30):
+            batch = tail[max(0, offset - 30) : offset]
+            if not fetch_batch(batch):
+                break
+            batch_posts = [posts_by_id[pid] for pid in batch if pid in posts_by_id]
+            if batch_posts and not any(post_in_window(p, window_start, window_end) for p in batch_posts):
+                break
+        selected_ids = {
+            pid for pid, post in posts_by_id.items()
+            if post_in_window(post, window_start, window_end)
+        }
+        if stream:
+            selected_ids.add(stream[0])
+        retained_stream = [pid for pid in stream if pid in selected_ids]
+        collection_scope = "first_post_and_window_updates"
+    else:
+        remaining = [pid for pid in stream if pid not in posts_by_id]
+        for batch in chunks(remaining, 30):
+            fetch_batch(batch)
+        retained_stream = stream
+        collection_scope = "full_stream"
+
     ordered_posts: list[dict[str, Any]] = []
-    for pid in stream:
+    for pid in retained_stream:
         post = posts_by_id.get(pid)
         if not post:
             continue
@@ -316,7 +368,7 @@ def collect_topic(page: Any, topic_meta: dict[str, Any], category_paths: dict[in
                 "text": html_to_text(post.get("cooked")),
             }
         )
-    missing = [pid for pid in stream if pid not in posts_by_id]
+    missing = [pid for pid in retained_stream if pid not in posts_by_id]
     category_id = int(data.get("category_id") or topic_meta.get("category_id") or 0)
     category_path = category_paths.get(category_id, "未分类")
     title = str(data.get("title") or topic_meta.get("title") or f"主题 {tid}")
@@ -336,10 +388,16 @@ def collect_topic(page: Any, topic_meta: dict[str, Any], category_paths: dict[in
         "reply_count": max(0, int(data.get("posts_count") or topic_meta.get("posts_count") or len(stream)) - 1),
         "views": int(data.get("views") or topic_meta.get("views") or 0),
         "stream_count": len(stream),
+        "collection_scope": collection_scope,
+        "intentionally_skipped_historical_posts": max(0, len(stream) - len(retained_stream)) if scoped else 0,
         "posts": ordered_posts,
         "missing_post_ids": missing,
         "errors": errors,
-        "verification": "全部可访问回复已采集" if not missing and not errors else "部分采集",
+        "verification": (
+            "首帖及窗口内可识别更新已采集"
+            if scoped and not missing and not errors
+            else ("全部可访问回复已采集" if not missing and not errors else "部分采集")
+        ),
     }
 
 
@@ -366,19 +424,21 @@ def auto_summary(topic: dict[str, Any]) -> list[str]:
     posts = topic["posts"]
     if not posts:
         return ["未能读取正文。"]
+    scoped = topic.get("collection_scope") == "first_post_and_window_updates"
     lines = [f"首帖：{clip(posts[0].get('text', ''), 520) or '（仅图片或附件，未提取到文字）'}"]
     replies = posts[1:]
     if not replies:
-        lines.append("讨论：抓取时尚无可访问回复。")
+        lines.append("本窗口更新：仅检测到首帖编辑，没有新增回复。" if scoped else "讨论：抓取时尚无可访问回复。")
         return lines
     reps = representative_replies(posts)
     if reps:
-        lines.append("讨论中的代表性信息：" + "；".join(reps))
+        lines.append(("本窗口更新中的代表性信息：" if scoped else "讨论中的代表性信息：") + "；".join(reps))
     else:
-        lines.append(f"讨论：共 {len(replies)} 条可访问回复，多为短回复或图片，自动文本摘要信息有限。")
+        prefix = "本窗口更新" if scoped else "讨论"
+        lines.append(f"{prefix}：共 {len(replies)} 条可访问回复，多为短回复或图片，自动文本摘要信息有限。")
     tail = [p.get("text", "") for p in posts[-4:] if p.get("text")]
     if tail:
-        lines.append("末段进展：" + clip("；".join(tail), 360))
+        lines.append(("本窗口末段进展：" if scoped else "末段进展：") + clip("；".join(tail), 360))
     return lines
 
 
@@ -450,7 +510,9 @@ def render_report(
         f"- {topic_count_label}：{len(topics)}",
         "- 大类别数量：" + ("；".join(f"{k} {v}" for k, v in sorted(counts.items())) if counts else "无"),
         f"- 阅读量严格超过 1,000 的非日记/水楼主题：{len(high)}",
-        "- 核验口径：正文与回复来自站内主题结构化数据；“全部可访问回复已采集”表示已覆盖主题返回的完整 post stream。自动摘要是离线抽取式摘要，主流观点仍建议由 ChatGPT 基于同目录 JSON 深度归纳。",
+        ("- 核验口径：窗口前已发布的旧主题只采集首帖和本窗口内可识别的新增/编辑楼层；窗口内新建主题采集其完整可访问楼层。"
+         if activity_report else
+         "- 核验口径：正文与回复来自站内主题结构化数据；“全部可访问回复已采集”表示已覆盖主题返回的完整 post stream。"),
         *( [f"- 本窗口排除的日记/水楼主题：{len(excluded_diaries or [])}"] if activity_report else [] ),
         "",
         "## 重点关注",
@@ -477,7 +539,11 @@ def render_report(
                 "",
                 f"- 主题 ID：{topic['id']}；板块：{topic['category_path']}；标签：{md_escape(tags)}",
                 f"- 首次发布时间：{fmt_time(topic['created_at'])}；最后活动：{fmt_time(topic['last_posted_at'])}",
-                f"- 阅读量：{topic['views']}；回复数：{topic['reply_count']}；已读取：{len(topic['posts'])}/{topic['stream_count']} 个可访问帖子；状态：{topic['verification']}",
+                (
+                    f"- 阅读量：{topic['views']}；回复数：{topic['reply_count']}；采集：首帖 + 本窗口更新，共 {len(topic['posts'])} 条（全楼 {topic['stream_count']} 条）；状态：{topic['verification']}"
+                    if topic.get("collection_scope") == "first_post_and_window_updates" else
+                    f"- 阅读量：{topic['views']}；回复数：{topic['reply_count']}；已读取：{len(topic['posts'])}/{topic['stream_count']} 个可访问帖子；状态：{topic['verification']}"
+                ),
             ]
             if activity_report:
                 new_numbers = topic.get("window_new_post_numbers", [])
@@ -490,7 +556,7 @@ def render_report(
             if topic["missing_post_ids"] or topic["errors"]:
                 lines.append(f"- 限制：缺失 post ID {topic['missing_post_ids'] or '无'}；错误：{md_escape('；'.join(topic['errors']) or '无')}")
             lines.append("")
-    partial = [t for t in topics if t["verification"] != "全部可访问回复已采集"]
+    partial = [t for t in topics if t["verification"] in {"部分采集", "未核验"}]
     excluded = [t for t in topics if t.get("diary_excluded") and t["views"] > 1000]
     lines += ["## 可能遗漏 / 访问限制", ""]
     if not partial:
@@ -597,7 +663,7 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
                 continue
             print(f"[{index}/{len(topics_meta)}] {tid} {clip(str(title), 54)}")
             try:
-                topics.append(collect_topic(page, meta, category_paths))
+                topics.append(collect_topic(page, meta, category_paths, start, end) if activity_mode else collect_topic(page, meta, category_paths))
             except Exception as exc:
                 category_id = int(meta.get("category_id") or 0)
                 path = category_paths.get(category_id, "未分类")
@@ -609,7 +675,9 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
                     "created_at": meta.get("created_at"), "last_posted_at": meta.get("last_posted_at"),
                     "posts_count": int(meta.get("posts_count") or 0),
                     "reply_count": max(0, int(meta.get("posts_count") or 0) - 1),
-                    "views": int(meta.get("views") or 0), "stream_count": 0, "posts": [],
+                    "views": int(meta.get("views") or 0), "stream_count": 0,
+                    "collection_scope": "first_post_and_window_updates" if activity_mode else "full_stream",
+                    "intentionally_skipped_historical_posts": 0, "posts": [],
                     "missing_post_ids": [], "errors": [str(exc)], "verification": "未核验",
                 })
             time.sleep(0.15)
