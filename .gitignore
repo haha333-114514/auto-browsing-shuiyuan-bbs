@@ -1,0 +1,18 @@
+# Local login/session data (contains browser cookies and credentials)
+.shuiyuan_edge_profile/
+
+# Generated reports and collected forum content
+水源日报输出/
+水源社区日报_*.md
+outputs/
+work/
+
+# Python caches
+__pycache__/
+*.py[cod]
+
+# Local/editor files
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/
