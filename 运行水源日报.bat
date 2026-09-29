@@ -1,7 +1,7 @@
 @echo off
 setlocal
 chcp 65001 >nul
-title Shuiyuan 24-Hour Report
+title Shuiyuan Today Report
 cd /d "%~dp0"
 
 if /i "%~1"=="--self-test" (
@@ -10,11 +10,13 @@ if /i "%~1"=="--self-test" (
 )
 
 echo ============================================================
-echo   Shuiyuan report for topics created in the last 24 hours
+echo   Shuiyuan report: today 00:00 to now
+echo   Includes newly created and updated topics
+echo   Diary and water threads are excluded
 echo ============================================================
 echo.
 
-python "%~dp0shuiyuan_daily.py" --hours 24
+python "%~dp0shuiyuan_daily.py" --today
 set "exit_code=%errorlevel%"
 
 echo.

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Generate full or incremental Shuiyuan forum reports using a persistent Edge session.
+"""Generate daily-activity or incremental Shuiyuan reports with a persistent Edge session.
 
 The collector deliberately uses same-origin browser fetches.  This keeps the
 normal logged-in session, avoids copying passwords/cookies, and bypasses the
@@ -425,9 +425,11 @@ def render_report(
     start: datetime,
     end: datetime,
     fetched_at: datetime,
-    incremental: bool = False,
+    mode: str = "new_topics",
     excluded_diaries: list[dict[str, Any]] | None = None,
 ) -> str:
+    activity_report = mode in {"today_activity", "incremental_activity"}
+    incremental = mode == "incremental_activity"
     counts = Counter(t["main_category"] for t in topics)
     high: list[dict[str, Any]] = []
     for topic in topics:
@@ -437,9 +439,9 @@ def render_report(
         if topic["views"] > 1000 and not diary:
             high.append(topic)
     high.sort(key=lambda t: (t["views"], t["reply_count"]), reverse=True)
-    report_name = "水源社区增量日报" if incremental else "水源社区 24 小时日报"
-    topic_count_label = "有更新的非日记/水楼主题数" if incremental else "新主题总数"
-    high_title = "本次更新主题中的高阅读量（严格 > 1,000，非日记/水楼）" if incremental else "最近 24 小时高阅读量（严格 > 1,000，非日记/水楼）"
+    report_name = "水源社区增量日报" if incremental else ("水源社区今日日报" if mode == "today_activity" else "水源社区日报")
+    topic_count_label = "有更新的非日记/水楼主题数" if activity_report else "新主题总数"
+    high_title = "本窗口更新主题中的高阅读量（严格 > 1,000，非日记/水楼）" if activity_report else "高阅读量主题（严格 > 1,000，非日记/水楼）"
     lines = [
         f"# {report_name}（{end:%Y-%m-%d %H:%M}）",
         "",
@@ -449,7 +451,7 @@ def render_report(
         "- 大类别数量：" + ("；".join(f"{k} {v}" for k, v in sorted(counts.items())) if counts else "无"),
         f"- 阅读量严格超过 1,000 的非日记/水楼主题：{len(high)}",
         "- 核验口径：正文与回复来自站内主题结构化数据；“全部可访问回复已采集”表示已覆盖主题返回的完整 post stream。自动摘要是离线抽取式摘要，主流观点仍建议由 ChatGPT 基于同目录 JSON 深度归纳。",
-        *( [f"- 本窗口排除的日记/水楼主题：{len(excluded_diaries or [])}"] if incremental else [] ),
+        *( [f"- 本窗口排除的日记/水楼主题：{len(excluded_diaries or [])}"] if activity_report else [] ),
         "",
         "## 重点关注",
         "",
@@ -477,7 +479,7 @@ def render_report(
                 f"- 首次发布时间：{fmt_time(topic['created_at'])}；最后活动：{fmt_time(topic['last_posted_at'])}",
                 f"- 阅读量：{topic['views']}；回复数：{topic['reply_count']}；已读取：{len(topic['posts'])}/{topic['stream_count']} 个可访问帖子；状态：{topic['verification']}",
             ]
-            if incremental:
+            if activity_report:
                 new_numbers = topic.get("window_new_post_numbers", [])
                 edited_numbers = topic.get("window_edited_post_numbers", [])
                 lines.append(
@@ -496,7 +498,7 @@ def render_report(
     else:
         for topic in partial:
             lines.append(f"- [{md_escape(topic['title'])}]({topic['url']})（ID {topic['id']}）：已读取 {len(topic['posts'])}/{topic['stream_count']}；缺失 {topic['missing_post_ids'] or '未明确'}；{md_escape('；'.join(topic['errors']))}")
-    if excluded and not incremental:
+    if excluded and not activity_report:
         lines += ["", "### 阅读量超过 1,000 但因日记/水楼排除", ""]
         for topic in excluded:
             lines.append(f"- [{md_escape(topic['title'])}]({topic['url']})：{topic['views']} 阅读；判断理由：{topic['diary_reason']}")
@@ -538,8 +540,11 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         start = latest_completed_end(output_dir) or (end - timedelta(hours=args.hours))
         if start >= end:
             start = end - timedelta(hours=args.hours)
+    elif args.today:
+        start = end.replace(hour=0, minute=0, second=0, microsecond=0)
     else:
         start = end - timedelta(hours=args.hours)
+    activity_mode = args.incremental or args.today
     profile_dir = root / ".shuiyuan_edge_profile"
     edge = find_edge()
 
@@ -568,19 +573,19 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
                 ensure_login(page, allow_wait=True)
             else:
                 raise
-        print("正在获取窗口内有活动的主题清单……" if args.incremental else "正在获取窗口内主题清单……")
-        if args.incremental:
+        print("正在获取窗口内有活动的主题清单……" if activity_mode else "正在获取窗口内主题清单……")
+        if activity_mode:
             topics_meta, category_paths = collect_updated_topic_index(page, start, end)
         else:
             topics_meta, category_paths = collect_topic_index(page, start, end)
-        noun = "个有更新的主题" if args.incremental else "个新主题"
+        noun = "个有更新的主题" if activity_mode else "个新主题"
         print(f"发现 {len(topics_meta)} {noun}，开始逐楼采集……")
         topics: list[dict[str, Any]] = []
         excluded_diaries: list[dict[str, Any]] = []
         for index, meta in enumerate(topics_meta, 1):
             tid = meta.get("id")
             title = meta.get("title") or ""
-            early_diary_reason = metadata_diary_reason(meta) if args.incremental else ""
+            early_diary_reason = metadata_diary_reason(meta) if activity_mode else ""
             if early_diary_reason:
                 excluded_diaries.append({
                     "id": int(tid),
@@ -611,7 +616,7 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         context.close()
 
     ignored_without_post_update: list[dict[str, Any]] = []
-    if args.incremental:
+    if activity_mode:
         kept: list[dict[str, Any]] = []
         for topic in topics:
             mark_window_updates(topic, start, end)
@@ -632,19 +637,20 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
 
     stamp = end.strftime("%Y-%m-%d_%H%M")
     prefix = "水源增量日报" if args.incremental else "水源日报"
+    mode = "incremental_activity" if args.incremental else ("today_activity" if args.today else "new_topics")
     json_path = output_dir / f"{prefix}_{stamp}_完整资料.json"
     md_path = output_dir / f"{prefix}_{stamp}.md"
     payload = {
         "window": {"start": start.isoformat(), "end": end.isoformat(), "timezone": "Asia/Shanghai"},
         "fetched_at": datetime.now(SHANGHAI).isoformat(),
-        "mode": "incremental_activity" if args.incremental else "new_topics",
+        "mode": mode,
         "excluded_diaries": excluded_diaries,
         "ignored_without_post_update": ignored_without_post_update,
         "topics": topics,
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(
-        render_report(topics, start, end, datetime.now(SHANGHAI), args.incremental, excluded_diaries),
+        render_report(topics, start, end, datetime.now(SHANGHAI), mode, excluded_diaries),
         encoding="utf-8-sig",
     )
     if args.incremental:
@@ -660,15 +666,41 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
     return md_path, json_path
 
 
+def establish_login_session() -> None:
+    """Open the dedicated Edge profile and only establish/refresh login state."""
+    root = Path(__file__).resolve().parent
+    profile_dir = root / ".shuiyuan_edge_profile"
+    edge = find_edge()
+    print("正在启动水源专用 Edge 登录窗口（本次不会采集帖子）……")
+    with sync_playwright() as p:
+        context = p.chromium.launch_persistent_context(
+            str(profile_dir),
+            executable_path=edge,
+            headless=False,
+            args=["--no-proxy-server", "--proxy-bypass-list=*"],
+            viewport={"width": 1280, "height": 900},
+        )
+        page = context.pages[0] if context.pages else context.new_page()
+        ensure_login(page, allow_wait=True)
+        context.close()
+
+
 def main() -> int:
-    parser = argparse.ArgumentParser(description="生成水源社区新主题日报或增量更新日报")
+    parser = argparse.ArgumentParser(description="生成水源社区今日日报或增量更新日报")
     parser.add_argument("--hours", type=float, default=24.0, help="统计时长，默认 24 小时")
     parser.add_argument("--end", help="固定截止时间（ISO 8601）；默认脚本启动时刻")
-    parser.add_argument("--incremental", action="store_true", help="按上次成功运行后有活动的主题生成增量日报；首次回退到 --hours")
+    mode_group = parser.add_mutually_exclusive_group()
+    mode_group.add_argument("--today", action="store_true", help="统计北京时间当天 00:00 后新建或有更新的主题")
+    mode_group.add_argument("--incremental", action="store_true", help="按上次成功运行后有活动的主题生成增量日报；首次回退到 --hours")
+    mode_group.add_argument("--login-only", action="store_true", help="仅建立或刷新水源登录会话，不采集帖子")
     parser.add_argument("--login", action="store_true", help="显示浏览器并建立/刷新登录会话")
     parser.add_argument("--no-interactive", action="store_true", help="登录失效时直接失败，不弹出浏览器（供定时任务使用）")
     args = parser.parse_args()
     try:
+        if args.login_only:
+            establish_login_session()
+            print("\n登录会话已就绪。本次未采集帖子，也未生成日报。")
+            return 0
         md_path, json_path = run(args)
         print("\n完成：")
         print(f"日报：{md_path}")
