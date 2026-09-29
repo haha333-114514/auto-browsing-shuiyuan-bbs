@@ -12,7 +12,7 @@ if /i "%~1"=="--self-test" (
 echo ============================================================
 echo   Shuiyuan report: today 00:00 to now
 echo   Includes newly created and updated topics
-echo   Diary and water threads are excluded
+echo   Diary, water, matchmaking, and sexual topics are excluded
 echo ============================================================
 echo.
 

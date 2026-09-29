@@ -45,6 +45,16 @@ DIARY_MARKERS = (
     "投资记录", "投资实录", "秋招记录", "求职记录", "每日一首",
     "摄影记录", "锻炼记录", "轻松一刻", "无人倾诉",
 )
+SEXUAL_MARKERS = (
+    "性行为", "性生活", "性经验", "性关系", "性需求", "性欲", "性冲动",
+    "性癖", "性取向", "性健康", "性教育", "性病", "性交", "性侵",
+    "性骚扰", "两性话题", "两性关系", "生殖器",
+    "做爱", "约炮", "一夜情", "处男", "处女", "自慰", "手淫",
+    "避孕", "安全套", "套套", "嫖娼", "卖淫", "援交", "强奸", "猥亵",
+    "情色", "色情", "黄文", "成人用品", "情趣用品", "成人内容", "成人话题",
+    "18禁", "r18", "nsfw", "涩涩", "瑟瑟",
+)
+SEXUAL_TAGS = {"性", "性话题", "性健康", "两性", "成人内容", "nsfw"}
 NOISE_REPLIES = {"cy", "蹲", "收藏", "mark", "顶", "同问", "插眼", "围观", "来了"}
 
 
@@ -283,6 +293,31 @@ def metadata_diary_reason(topic_meta: dict[str, Any]) -> str:
     return ""
 
 
+def sexual_content_reason(title: str, tags: list[str], body: str = "") -> str:
+    normalized_tags = {tag.strip().lower() for tag in tags}
+    matched_tags = sorted(normalized_tags & SEXUAL_TAGS)
+    if matched_tags:
+        return f"标签属于性相关内容：{'、'.join(matched_tags)}"
+    haystack = f"{title}\n{body}".lower()
+    for marker in SEXUAL_MARKERS:
+        if marker.lower() in haystack:
+            return f"标题或内容涉及性相关主题（命中“{marker}”）"
+    return ""
+
+
+def metadata_exclusion(topic_meta: dict[str, Any], category_path: str) -> tuple[str, str] | None:
+    if "相约鹊桥" in category_path:
+        return "matchmaking", "属于“相约鹊桥”板块"
+    diary_reason = metadata_diary_reason(topic_meta)
+    if diary_reason:
+        return "diary", diary_reason
+    title = str(topic_meta.get("title") or "").strip()
+    sexual_reason = sexual_content_reason(title, normalize_tags(topic_meta.get("tags")))
+    if sexual_reason:
+        return "sexual", sexual_reason
+    return None
+
+
 def post_in_window(post: dict[str, Any], start: datetime, end: datetime) -> bool:
     created = parse_time(post.get("created_at"))
     updated = parse_time(post.get("updated_at"))
@@ -458,6 +493,19 @@ def is_diary(topic: dict[str, Any]) -> tuple[bool, str]:
     return False, ""
 
 
+def topic_exclusion(topic: dict[str, Any]) -> tuple[str, str] | None:
+    if "相约鹊桥" in topic.get("category_path", ""):
+        return "matchmaking", "属于“相约鹊桥”板块"
+    diary, diary_reason = is_diary(topic)
+    if diary:
+        return "diary", diary_reason
+    body = "\n".join(str(post.get("text") or "") for post in topic.get("posts", []))
+    sexual_reason = sexual_content_reason(topic.get("title", ""), topic.get("tags", []), body)
+    if sexual_reason:
+        return "sexual", sexual_reason
+    return None
+
+
 def mark_window_updates(topic: dict[str, Any], start: datetime, end: datetime) -> None:
     new_numbers: list[int] = []
     edited_numbers: list[int] = []
@@ -486,10 +534,11 @@ def render_report(
     end: datetime,
     fetched_at: datetime,
     mode: str = "new_topics",
-    excluded_diaries: list[dict[str, Any]] | None = None,
+    excluded_topics: list[dict[str, Any]] | None = None,
 ) -> str:
     activity_report = mode in {"today_activity", "incremental_activity"}
     incremental = mode == "incremental_activity"
+    exclusion_counts = Counter(item.get("kind", "other") for item in (excluded_topics or []))
     counts = Counter(t["main_category"] for t in topics)
     high: list[dict[str, Any]] = []
     for topic in topics:
@@ -500,8 +549,8 @@ def render_report(
             high.append(topic)
     high.sort(key=lambda t: (t["views"], t["reply_count"]), reverse=True)
     report_name = "水源社区增量日报" if incremental else ("水源社区今日日报" if mode == "today_activity" else "水源社区日报")
-    topic_count_label = "有更新的非日记/水楼主题数" if activity_report else "新主题总数"
-    high_title = "本窗口更新主题中的高阅读量（严格 > 1,000，非日记/水楼）" if activity_report else "高阅读量主题（严格 > 1,000，非日记/水楼）"
+    topic_count_label = "筛选后有更新的主题数" if activity_report else "新主题总数"
+    high_title = "本窗口更新主题中的高阅读量（严格 > 1,000，已排除指定内容）" if activity_report else "高阅读量主题（严格 > 1,000，非日记/水楼）"
     lines = [
         f"# {report_name}（{end:%Y-%m-%d %H:%M}）",
         "",
@@ -509,11 +558,15 @@ def render_report(
         f"- 抓取完成时间：{fetched_at:%Y-%m-%d %H:%M:%S}",
         f"- {topic_count_label}：{len(topics)}",
         "- 大类别数量：" + ("；".join(f"{k} {v}" for k, v in sorted(counts.items())) if counts else "无"),
-        f"- 阅读量严格超过 1,000 的非日记/水楼主题：{len(high)}",
+        f"- 阅读量严格超过 1,000 的筛选后主题：{len(high)}",
         ("- 核验口径：窗口前已发布的旧主题只采集首帖和本窗口内可识别的新增/编辑楼层；窗口内新建主题采集其完整可访问楼层。"
          if activity_report else
          "- 核验口径：正文与回复来自站内主题结构化数据；“全部可访问回复已采集”表示已覆盖主题返回的完整 post stream。"),
-        *( [f"- 本窗口排除的日记/水楼主题：{len(excluded_diaries or [])}"] if activity_report else [] ),
+        *( [
+            "- 本窗口排除主题："
+            f"共 {len(excluded_topics or [])}；日记/水楼 {exclusion_counts.get('diary', 0)}；"
+            f"相约鹊桥 {exclusion_counts.get('matchmaking', 0)}；性相关 {exclusion_counts.get('sexual', 0)}"
+        ] if activity_report else [] ),
         "",
         "## 重点关注",
         "",
@@ -647,19 +700,23 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         noun = "个有更新的主题" if activity_mode else "个新主题"
         print(f"发现 {len(topics_meta)} {noun}，开始逐楼采集……")
         topics: list[dict[str, Any]] = []
-        excluded_diaries: list[dict[str, Any]] = []
+        excluded_topics: list[dict[str, Any]] = []
         for index, meta in enumerate(topics_meta, 1):
             tid = meta.get("id")
             title = meta.get("title") or ""
-            early_diary_reason = metadata_diary_reason(meta) if activity_mode else ""
-            if early_diary_reason:
-                excluded_diaries.append({
+            category_id = int(meta.get("category_id") or 0)
+            category_path = category_paths.get(category_id, "未分类")
+            early_exclusion = metadata_exclusion(meta, category_path) if activity_mode else None
+            if early_exclusion:
+                exclusion_kind, exclusion_reason = early_exclusion
+                excluded_topics.append({
                     "id": int(tid),
                     "title": str(title or f"主题 {tid}"),
                     "url": f"{BASE_URL}/t/topic/{tid}",
-                    "reason": early_diary_reason,
+                    "kind": exclusion_kind,
+                    "reason": exclusion_reason,
                 })
-                print(f"[{index}/{len(topics_meta)}] 跳过日记/水楼 {tid} {clip(str(title), 42)}")
+                print(f"[{index}/{len(topics_meta)}] 跳过已排除主题 {tid} {clip(str(title), 42)}：{exclusion_reason}")
                 continue
             print(f"[{index}/{len(topics_meta)}] {tid} {clip(str(title), 54)}")
             try:
@@ -696,9 +753,13 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
                     "reason": "本窗口未核验到新增或编辑楼层",
                 })
                 continue
-            diary, reason = is_diary(topic)
-            if diary:
-                excluded_diaries.append({"id": topic["id"], "title": topic["title"], "url": topic["url"], "reason": reason})
+            exclusion = topic_exclusion(topic)
+            if exclusion:
+                exclusion_kind, exclusion_reason = exclusion
+                excluded_topics.append({
+                    "id": topic["id"], "title": topic["title"], "url": topic["url"],
+                    "kind": exclusion_kind, "reason": exclusion_reason,
+                })
                 continue
             kept.append(topic)
         topics = kept
@@ -712,13 +773,14 @@ def run(args: argparse.Namespace) -> tuple[Path, Path]:
         "window": {"start": start.isoformat(), "end": end.isoformat(), "timezone": "Asia/Shanghai"},
         "fetched_at": datetime.now(SHANGHAI).isoformat(),
         "mode": mode,
-        "excluded_diaries": excluded_diaries,
+        "excluded_topics": excluded_topics,
+        "excluded_diaries": [item for item in excluded_topics if item.get("kind") == "diary"],
         "ignored_without_post_update": ignored_without_post_update,
         "topics": topics,
     }
     json_path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
     md_path.write_text(
-        render_report(topics, start, end, datetime.now(SHANGHAI), mode, excluded_diaries),
+        render_report(topics, start, end, datetime.now(SHANGHAI), mode, excluded_topics),
         encoding="utf-8-sig",
     )
     if args.incremental:
