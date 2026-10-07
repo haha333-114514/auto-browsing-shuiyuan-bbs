@@ -12,7 +12,7 @@ if /i "%~1"=="--self-test" (
 echo ============================================================
 echo   Shuiyuan incremental report
 echo   Window: last successful run to now
-echo   Diary, water, matchmaking, and sexual topics are excluded
+echo   Unwanted categories and diary-like topics are excluded
 echo ============================================================
 echo.
 

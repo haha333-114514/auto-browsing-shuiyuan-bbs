@@ -41,10 +41,22 @@ FOCUS_CATEGORIES = {"校园生活", "人生经验", "广而告之"}
 FOCUS_TAGS = {"保研", "实习", "ai", "友校", "海峡两岸", "吃瓜", "涉政"}
 DIARY_MARKERS = (
     "日记", "水楼", "记录楼", "打卡", "灌水楼", "投喂", "碎碎念",
-    "成长记录", "手记", "轶事楼", "daily", "日常", "子楼", "测评楼", "交流楼",
+    "成长记录", "手记", "轶事楼", "daily", "日常记录", "子楼", "测评楼", "交流楼",
     "投资记录", "投资实录", "秋招记录", "求职记录", "每日一首",
-    "摄影记录", "锻炼记录", "轻松一刻", "无人倾诉",
+    "摄影记录", "锻炼记录", "轻松一刻", "无人倾诉", "流水账",
+    "生活记录", "长期记录", "持续更新", "不定期更新", "每日更新",
+    "每周更新", "随缘更新", "更新楼", "连载楼", "自留地", "备忘录",
+    "个人记录", "记录帖", "记录贴", "长期楼", "长期更新", "周记", "月记",
+    "直播帖", "直播贴", "树洞",
 )
+EXCLUDED_CATEGORY_MARKERS = ("相约鹊桥", "知性感性", "心情驿站", "谈笑风生")
+ROMANCE_MARKERS = (
+    "恋爱", "暧昧", "表白", "脱单", "分手", "复合", "前任", "相亲",
+    "crush", "男朋友", "女朋友", "男友", "女友", "情侣", "喜欢的人",
+    "追女生", "追男生", "情感问题", "感情问题", "恋爱关系", "交友", "征友",
+)
+TUTORING_MARKERS = ("家教", "一对一辅导", "上门辅导", "课外辅导", "辅导老师")
+COMPANION_MARKERS = ("搭子", "饭搭子", "自习搭子", "运动搭子", "旅行搭子", "游戏搭子")
 SEXUAL_MARKERS = (
     "性行为", "性生活", "性经验", "性关系", "性需求", "性欲", "性冲动",
     "性癖", "性取向", "性健康", "性教育", "性病", "性交", "性侵",
@@ -280,9 +292,8 @@ def normalize_tags(raw: Any) -> list[str]:
     return [x for x in result if x]
 
 
-def metadata_diary_reason(topic_meta: dict[str, Any]) -> str:
-    title = str(topic_meta.get("title") or "").strip()
-    haystack = " ".join([title, *normalize_tags(topic_meta.get("tags"))]).lower()
+def diary_content_reason(title: str, tags: list[str], body: str = "") -> str:
+    haystack = " ".join([title, *tags]).lower()
     for marker in DIARY_MARKERS:
         if marker.lower() in haystack:
             return f"标题或标签含“{marker}”"
@@ -290,7 +301,65 @@ def metadata_diary_reason(topic_meta: dict[str, Any]) -> str:
         return "标题显示为持续更新楼/讨论楼"
     if re.search(r"楼(?:\s*\d+(?:\.\d+)?)?\s*[！!。.～~…]*\s*$", title, re.IGNORECASE):
         return "标题显示为持续更新楼/讨论楼"
+    if re.search(r"(?:第\s*\d+\s*天|day\s*\d+)", title, re.IGNORECASE):
+        return "标题按天编号，显示为连续记录"
+    excerpt = body[:1600]
+    if re.search(
+        r"长期(?:记录|更新)|持续(?:记录|更新)|每天(?:来|会|都)?.{0,12}(?:记录|打卡|更新)|"
+        r"不定期.{0,8}(?:记录|更新)|后续.{0,12}更新|以后.{0,12}(?:记录|更新)|"
+        r"(?:开|建)(?:一个|个)?.{0,8}(?:楼|帖).{0,20}(?:记录|更新)|本(?:楼|帖).{0,16}(?:记录|更新)",
+        excerpt,
+        re.IGNORECASE,
+    ):
+        return "首帖显示为长期连续记录"
     return ""
+
+
+def metadata_diary_reason(topic_meta: dict[str, Any]) -> str:
+    return diary_content_reason(
+        str(topic_meta.get("title") or "").strip(),
+        normalize_tags(topic_meta.get("tags")),
+    )
+
+
+def category_exclusion(category_path: str) -> tuple[str, str] | None:
+    if "家教" in category_path:
+        return "tutoring", "属于家教相关板块"
+    for marker in EXCLUDED_CATEGORY_MARKERS:
+        if marker in category_path:
+            kind = "matchmaking" if marker == "相约鹊桥" else "excluded_category"
+            return kind, f"属于“{marker}”板块"
+    return None
+
+
+def preference_content_reason(title: str, tags: list[str], first_post: str = "") -> tuple[str, str] | None:
+    title_and_tags = " ".join([title, *tags]).lower()
+    first_excerpt = first_post[:1800].lower()
+
+    romance_guard = ("情感分析", "情感计算", "情感识别", "感情用事")
+    if not any(item in title_and_tags for item in romance_guard):
+        for marker in ROMANCE_MARKERS:
+            if marker.lower() in title_and_tags or marker.lower() in first_excerpt:
+                return "romance", f"主题以恋爱/情感关系为主（命中“{marker}”）"
+        if re.search(r"(?:找|谈|处|介绍|有没有|有无).{0,8}(?:对象|伴侣)", title_and_tags):
+            return "romance", "主题以寻找或讨论恋爱对象为主"
+
+    for marker in TUTORING_MARKERS:
+        if marker.lower() in title_and_tags:
+            return "tutoring", f"主题属于家教/课外辅导（命中“{marker}”）"
+    if re.search(
+        r"(?:招|找|求|接|推荐|介绍).{0,10}家教|家教.{0,16}(?:老师|学生|时薪|课时|价格|费用|地点|辅导)",
+        first_excerpt,
+    ):
+        return "tutoring", "首帖属于家教招募或课外辅导信息"
+
+    for marker in COMPANION_MARKERS:
+        if marker.lower() in title_and_tags or marker.lower() in first_excerpt:
+            return "companion", f"主题属于找搭子/同伴（命中“{marker}”）"
+    companion_pattern = r"(?:找|求|蹲|有无|有没有).{0,14}(?:同伴|队友|人一起)|(?:找人|求带).{0,10}(?:组队|一起)"
+    if re.search(companion_pattern, title_and_tags) or re.search(companion_pattern, first_excerpt):
+        return "companion", "主题以寻找同行者、队友或活动同伴为主"
+    return None
 
 
 def sexual_content_reason(title: str, tags: list[str], body: str = "") -> str:
@@ -306,15 +375,20 @@ def sexual_content_reason(title: str, tags: list[str], body: str = "") -> str:
 
 
 def metadata_exclusion(topic_meta: dict[str, Any], category_path: str) -> tuple[str, str] | None:
-    if "相约鹊桥" in category_path:
-        return "matchmaking", "属于“相约鹊桥”板块"
+    category_reason = category_exclusion(category_path)
+    if category_reason:
+        return category_reason
     diary_reason = metadata_diary_reason(topic_meta)
     if diary_reason:
         return "diary", diary_reason
     title = str(topic_meta.get("title") or "").strip()
-    sexual_reason = sexual_content_reason(title, normalize_tags(topic_meta.get("tags")))
+    tags = normalize_tags(topic_meta.get("tags"))
+    sexual_reason = sexual_content_reason(title, tags)
     if sexual_reason:
         return "sexual", sexual_reason
+    preference_reason = preference_content_reason(title, tags)
+    if preference_reason:
+        return preference_reason
     return None
 
 
@@ -479,23 +553,15 @@ def auto_summary(topic: dict[str, Any]) -> list[str]:
 
 def is_diary(topic: dict[str, Any]) -> tuple[bool, str]:
     title = topic.get("title", "").strip()
-    haystack = " ".join([title, *topic.get("tags", [])]).lower()
-    for marker in DIARY_MARKERS:
-        if marker.lower() in haystack:
-            return True, f"标题或标签含“{marker}”"
-    if re.search(r"(?:建一个|求职|推歌|评测|讨论|交流|吐槽|占卜|发疯|投喂)[^\n]{0,30}楼|楼\s*[：:｜|—【]", title, re.IGNORECASE):
-        return True, "标题显示为持续更新楼/讨论楼"
-    if re.search(r"楼(?:\s*\d+(?:\.\d+)?)?\s*[！!。.～~…]*\s*$", title, re.IGNORECASE):
-        return True, "标题显示为持续更新楼/讨论楼"
     first = topic.get("posts", [{}])[0].get("text", "") if topic.get("posts") else ""
-    if re.search(r"长期记录|持续更新|每日记录|开个楼|本楼用于", first[:800]):
-        return True, "首帖显示为长期连续记录/水楼"
-    return False, ""
+    reason = diary_content_reason(title, topic.get("tags", []), first)
+    return bool(reason), reason
 
 
 def topic_exclusion(topic: dict[str, Any]) -> tuple[str, str] | None:
-    if "相约鹊桥" in topic.get("category_path", ""):
-        return "matchmaking", "属于“相约鹊桥”板块"
+    category_reason = category_exclusion(topic.get("category_path", ""))
+    if category_reason:
+        return category_reason
     diary, diary_reason = is_diary(topic)
     if diary:
         return "diary", diary_reason
@@ -503,6 +569,10 @@ def topic_exclusion(topic: dict[str, Any]) -> tuple[str, str] | None:
     sexual_reason = sexual_content_reason(topic.get("title", ""), topic.get("tags", []), body)
     if sexual_reason:
         return "sexual", sexual_reason
+    first_post = topic.get("posts", [{}])[0].get("text", "") if topic.get("posts") else ""
+    preference_reason = preference_content_reason(topic.get("title", ""), topic.get("tags", []), first_post)
+    if preference_reason:
+        return preference_reason
     return None
 
 
@@ -564,8 +634,10 @@ def render_report(
          "- 核验口径：正文与回复来自站内主题结构化数据；“全部可访问回复已采集”表示已覆盖主题返回的完整 post stream。"),
         *( [
             "- 本窗口排除主题："
-            f"共 {len(excluded_topics or [])}；日记/水楼 {exclusion_counts.get('diary', 0)}；"
-            f"相约鹊桥 {exclusion_counts.get('matchmaking', 0)}；性相关 {exclusion_counts.get('sexual', 0)}"
+            f"共 {len(excluded_topics or [])}；日记/持续记录 {exclusion_counts.get('diary', 0)}；"
+            f"指定板块 {exclusion_counts.get('matchmaking', 0) + exclusion_counts.get('excluded_category', 0)}；"
+            f"恋爱/情感 {exclusion_counts.get('romance', 0)}；家教 {exclusion_counts.get('tutoring', 0)}；"
+            f"找搭子 {exclusion_counts.get('companion', 0)}；性相关 {exclusion_counts.get('sexual', 0)}"
         ] if activity_report else [] ),
         "",
         "## 重点关注",
